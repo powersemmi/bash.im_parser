@@ -2,6 +2,7 @@
 The script to parce bash.im
 ## Requirements
 python3.7 or later
+
 sqlite3 database with table from db.sql file
 ### using libs:
   * requests

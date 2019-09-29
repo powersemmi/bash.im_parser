@@ -12,12 +12,26 @@ import os
 
 class BashImParser:
     def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.counter = 0
-        self.last_id = 0
-        self.from_id = 0
-        self.bad_connections = 0
-        self.sql_queries = {
+        """
+        Вкраце об алгоритме:
+        Функция инициализации (init)
+        1) Скачивает, затем парсит первую цитату на главной странице, она же последняя опубликованная.
+        2) Вытаскиваем id цитаты
+        3) Параллельно, по кол-ву ядер процессора, скачиваем и парсим все id от 0 до последнего.
+        4) В случае если случается редирект (код 302) на основную страницу пропускаем этот id
+        5) После парсинга, обрабатываем данные и закидываем их в базу данных, так же параллельно,
+        потому что базы данных расчитанны больше на множество коротких запросов, чем на 1 и длинный.
+        6) Устанавливаем в не занятый id 0 в базе данных, в поле text, id цитаты, которую мы парсили в самом начале
+        Функция обновления (update)
+        1) Скачивает, затем парсит первую цитату на главной странице, она же последняя опубликованная.
+        2) Парсим все новые цитаты в промежутке от устаревшего id до нового id
+        """
+        self.db_path: str = db_path
+        self.counter: int = 0  # quote counter
+        self.last_id: int = 0  # id last quote of the last update
+        self.from_id: int = 0  # id last quote in site
+        self.bad_connections: int = 0  # for collect sum of bad attempts
+        self.sql_queries: dict = {
             "DROP": "DROP TABLE quote",
             "CREATE_TABLE": """
                 CREATE TABLE IF NOT EXISTS quote (
@@ -26,8 +40,11 @@ class BashImParser:
                 url VARCHAR(255),
                 likes INTEGER,
                 date DATETIME);""",
-            "INSERT_IN_TABLE": 'INSERT INTO quote (id, text, url, likes, date) VALUES (?, ?, ?, ?, ?)',
-            "INSERT_ZERO": 'INSERT INTO quote (id, text) VALUES (?, ?)'
+            "INSERT_IN_TABLE": 'INSERT INTO quote (id, text, url, likes, date) VALUES (?, ?, ?, ?, ?);',
+            "UPDATE_IN_TABLE": "UPDATE quote SET text=?, url=?, likes=?, date=? WHERE id=?",
+            "INSERT_ZERO": 'INSERT INTO quote (id, text) VALUES (?, ?);',
+            "SELECT_ZERO": "SELECT text FROM quote WHERE id=?;",
+            "UPDATE_ZERO": 'UPDATE quote SET text=? WHERE id=?;',
         }
 
     def connect(self):
@@ -49,7 +66,7 @@ class BashImParser:
         cursor, conn = self.connect()
 
         # create table
-        cursor.execute(self.sql_queries["DROP"])
+        # cursor.execute(self.sql_queries["DROP"])
         cursor.execute(self.sql_queries["CREATE_TABLE"])
 
         # create zero index for last update
@@ -82,11 +99,14 @@ class BashImParser:
         cursor, conn = self.connect()
 
         # create table
-        cursor.execute(self.sql_queries["DROP"])
+        # cursor.execute(self.sql_queries["DROP"])
         cursor.execute(self.sql_queries["CREATE_TABLE"])
 
         # create zero index for last update
-        cursor.execute(self.sql_queries["INSERT_ZERO"], (0, self.last_id))
+        try:
+            cursor.execute(self.sql_queries["INSERT_ZERO"], (0, self.last_id))
+        except sqlite3.IntegrityError:
+            cursor.execute(self.sql_queries["UPDATE_ZERO"], (self.last_id, 0))
 
         conn.close()
 
@@ -123,7 +143,10 @@ class BashImParser:
 
         cursor, conn = self.connect()
 
-        cursor.execute(self.sql_queries["INSERT_IN_TABLE"], (id, quote, url, likes, date))
+        try:
+            cursor.execute(self.sql_queries["INSERT_IN_TABLE"], (id, quote, url, likes, date))
+        except sqlite3.IntegrityError:
+            cursor.execute(self.sql_queries["UPDATE_IN_TABLE"], (quote, url, likes, date, id))
         conn.close()
 
         self.counter += 1
@@ -134,7 +157,7 @@ class BashImParser:
     def update(self):
         cursor, conn = self.connect()
 
-        last_id = int(cursor.execute("SELECT text FROM quote WHERE id=0").fetchall()[0][0])
+        last_id = int(cursor.execute(self.sql_queries["SELECT_ZERO"], (0,)).fetchall()[0][0])
 
         main_page = requests.get("https://bash.im")
         tree = html.fromstring(main_page.content)
@@ -148,7 +171,7 @@ class BashImParser:
 
 if __name__ == '__main__':
     guide = \
-f"""
+        f"""
 enter "./{os.path.basename(__file__)} init path_to_sqlite_database" if you want to initialize the parser
 enter "./{os.path.basename(__file__)} update path_to_sqlite_database" if you want update parsed data"""
     if len(sys.argv) == 3:
